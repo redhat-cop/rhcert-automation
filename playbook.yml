@@ -1,0 +1,165 @@
+---
+- name: CCSP Ansible Playbook
+  hosts: localhost
+  tasks:
+    - name: Install required RPM packages
+      yum:
+        name:
+          - insights-client
+          - podman
+          - uuidd
+          - libnsl
+          - tcsh
+          - psmisc
+          - nfs-utils
+          - bind-utils
+          - redhat-certification-cloud
+        state: latest
+
+    - name: Enable and restart nftables and firewalld
+      ignore_errors: yes
+      systemd:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - nftables
+        - firewalld
+
+    - name: Check for redhat-cert RPM package
+      shell: rpm -qa | grep redhat-cert
+      register: redhat_cert_package
+      ignore_errors: yes
+
+    - name: Debug grep
+      debug:
+        var: redhat_cert_package.stdout
+
+    - name: Clean rhcert-cli
+      shell: yes | rhcert-cli clean all
+
+    - name: Restart rhcertd
+      ignore_errors: yes
+      shell: rhcertd restart
+
+    - name: Get Access token
+      uri:
+        url: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
+        method: POST
+        body_format: form-urlencoded
+        body: 
+          grant_type: refresh_token
+          client_id: "cloud-services"
+          refresh_token: "{{ UserToken }}"
+        return_content: yes
+        status_code: 200
+      register: auth
+
+    - name: Check if token refresh was successful
+      fail:
+        msg: "Token refresh failed: {{ auth }}"
+      when: auth.status != 200
+
+    - name: Create CCSP Case
+      uri:
+        url: https://access.redhat.com/hydra/cwe/rest/v1.0/certifications
+        method: POST
+        headers:
+          Content-Type: "application/json"
+          Authorization: "Bearer {{ auth.json.access_token }}"
+        body: '{"partnerProductId": "{{ PartnerProductId }}","certificationTypeId": "{{ CertificationTypeId }}","classificationId":1}'
+        body_format: json
+        return_content: yes
+      register: rhcert
+
+    - name: Case Number
+      debug:
+        msg: https://rhcert.connect.redhat.com/#/cases/{{ rhcert.json.caseNumber }}
+      when: rhcert.json.caseNumber is defined
+
+    - name: Provision & Run
+      shell: rhcert-cli run -m auto
+      ignore_errors: yes
+      register: provision
+
+    - name: Debug Provision & Run
+      debug:
+        var: provision.stdout
+      when: provision.stdout is defined
+
+    - name: Save test result
+      shell: rhcert-cli save
+      ignore_errors: yes
+      register: save
+
+    - name: Debug rhcert-cli save
+      debug:
+        var: save.stdout
+      when: save.stdout is defined
+
+    - name: Save File name
+      shell: echo "{{save.stdout}}" | grep -o '/.*\.xml'
+      ignore_errors: yes
+      register: file
+
+    - name: Debug Test Result File Name
+      debug:
+        var: file.stdout
+      when: file.stdout is defined
+      
+    - name: Pause for 1 minute to build test results
+      pause:
+        minutes: 1
+
+    - name: Case Number
+      debug:
+        msg: Uploading {{ file.stdout }} for {{ rhcert.json.caseNumber }}
+      when: rhcert.json.id is defined 
+
+    - name: Get stats of the Result File
+      ansible.builtin.stat:
+        path: "{{ file.stdout }}"
+      register: sym
+
+    - name: Error - doesn't exits
+      ansible.builtin.debug:
+        msg: "islnk isn't defined (path doesn't exist)"
+      when: sym.stat.islnk is not defined
+
+    - name: Get Access token
+      uri:
+        url: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
+        method: POST
+        body_format: form-urlencoded
+        body: 
+          grant_type: refresh_token
+          client_id: "cloud-services"
+          refresh_token: "{{ UserToken }}"
+        return_content: yes
+        status_code: 200
+      register: auth
+
+    - name: Check if token refresh was successful
+      fail:
+        msg: "Token refresh failed: {{ auth }}"
+      when: auth.status != 200
+      
+    - name: Upload test result xml via curl
+      shell: 'curl -X POST https://access.redhat.com/hydra/cwe/rest/v1.0/attachments/upload \
+      -H "Authorization: Bearer {{ auth.json.access_token }}" \
+      -F "attachment=@{{ file.stdout }}" \
+      -F "type=CertResult" \
+      -F "certId={{ rhcert.json.id }}" \
+      -F "description=ansible-upload"'
+      args:
+        warn: false
+      register: upload
+
+    - name: Debug Test Result File Upload
+      debug:
+        var: upload.stdout
+      when: upload.stdout is defined
+
+    - name: Open Certification Case Link
+      debug:
+        msg: https://rhcert.connect.redhat.com/#/cases/{{ rhcert.json.caseNumber }}
+      when: rhcert.json.caseNumber is defined
